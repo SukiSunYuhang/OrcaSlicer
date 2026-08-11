@@ -16,7 +16,7 @@ END_EVENT_TABLE()
 WebDeviceDialog::WebDeviceDialog()
     : wxDialog((wxWindow*)(wxGetApp().mainframe), wxID_ANY, _L("Add Device"))
 {
-    m_device_url = wxString::FromUTF8(LOCALHOST_URL + std::to_string(wxGetApp().get_page_http_port()) +
+    m_device_url = wxString::FromUTF8(std::string(LOCALHOST_URL) + "8767" +
                    "/web/flutter_web/index.html?path=discovery");
 
     SetBackgroundColour(*wxWHITE);
