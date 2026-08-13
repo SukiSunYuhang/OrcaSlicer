@@ -3173,6 +3173,196 @@ void SSWCP_MachineOption_Instance::sw_FinishFilamentMapping()
         handle_general_fail();
     }
 }
+nlohmann::json SSWCP::build_filament_mapping_json(const std::string& filename)
+{
+    json response = json::object();
+    try {
+        if (filename.empty()) return response;
+        if (!boost::filesystem::exists(filename) || !boost::filesystem::is_regular_file(filename)) return response;
+
+        auto* print = wxGetApp().plater()->get_partplate_list().get_curr_plate()->fff_print();
+        auto& config = print->config();
+        auto full_config = print->full_print_config();
+        auto& result = *(wxGetApp().plater()->get_partplate_list().get_curr_plate()->get_slice_result());
+
+        auto time = wxGetApp().mainframe->plater()->get_partplate_list().get_curr_plate()
+                        ->get_slice_result()->print_statistics.modes[static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Normal)].time;
+        response["estimated_time"] = time;
+
+        auto color_to_int = [](const std::string& oriclr) -> long long {
+            long long res = 0;
+            if ((oriclr.size() != 7 && oriclr.size() != 9) || oriclr[0] != '#') return 0;
+            auto colorSize = oriclr.size();
+            for (auto i = 1; i < colorSize; i++) {
+                if (oriclr[colorSize - i] - '0' >= 0 && oriclr[colorSize - i] - '0' <= 9) {
+                    res += std::pow(16, i - 1) * (oriclr[colorSize - i] - '0');
+                } else {
+                    res += std::pow(16, i - 1) * (oriclr[colorSize - i] - 'A' + 10);
+                }
+            }
+            return res;
+        };
+
+        if (config.has("filament_colour")) {
+            std::vector<std::string> filament_color = config.option<ConfigOptionStrings>("filament_colour")->values;
+            const ConfigOptionStrings* filament_multi_colors = nullptr;
+            if (config.has("filament_multi_colors")) filament_multi_colors = config.option<ConfigOptionStrings>("filament_multi_colors");
+            const ConfigOptionInts* filament_colour_modes = nullptr;
+            if (config.has("filament_colour_mode")) filament_colour_modes = config.option<ConfigOptionInts>("filament_colour_mode");
+            std::vector<long long> number_res(filament_color.size(), 0);
+            std::vector<std::string> str_res(filament_color.size());
+            json multi_color_res = json::array();
+            for (size_t i = 0; i < filament_color.size(); ++i) {
+                number_res[i] = color_to_int(filament_color[i]);
+                str_res[i] = filament_color[i];
+                const bool has_multi_colors = filament_multi_colors != nullptr && filament_multi_colors->values.size() > i;
+                const bool has_mode = filament_colour_modes != nullptr && filament_colour_modes->values.size() > i;
+                const std::string multi_colors = has_multi_colors ? filament_multi_colors->values[i] : std::string();
+                FilamentColorMode colorMode = FilamentColorMode::Segment;
+                if (has_mode) colorMode = FilamentColorModeFromConfig(filament_colour_modes->values[i]);
+                multi_color_res.push_back(FilamentColorUtils::BuildPreprintColorMultiItem(multi_colors, colorMode, filament_color[i]));
+            }
+            response["filament_color"] = number_res;
+            response["filament_color_rgba"] = str_res;
+            response["filament_color_multi"] = multi_color_res;
+        }
+
+        if (const auto* filament_type_opt = full_config.option<ConfigOptionStrings>("filament_type");
+            filament_type_opt != nullptr && !filament_type_opt->values.empty()) {
+            std::vector<std::string> filament_types;
+            size_t filament_count = filament_type_opt->values.size();
+            if (const auto* filament_colour_opt = full_config.option<ConfigOptionStrings>("filament_colour")) {
+                filament_count = std::max(filament_count, filament_colour_opt->values.size());
+            }
+            filament_types.reserve(filament_count);
+            for (size_t i = 0; i < filament_count; ++i) {
+                std::string filament_type = filament_type_opt->get_at(int(i));
+                boost::trim(filament_type);
+                filament_types.emplace_back(std::move(filament_type));
+            }
+            response["filament_type"] = filament_types;
+        }
+
+        if (full_config.has("nozzle_diameter")) {
+            const auto* opt_nozzle_diameters = full_config.option<ConfigOptionFloats>("nozzle_diameter");
+            if (opt_nozzle_diameters != nullptr) {
+                std::vector<std::string> nozzle_diameters;
+                nozzle_diameters.reserve(opt_nozzle_diameters->values.size());
+                for (double diameter : opt_nozzle_diameters->values) {
+                    std::ostringstream stream;
+                    stream << std::fixed << std::setprecision(1) << diameter;
+                    nozzle_diameters.emplace_back(stream.str());
+                }
+                response["nozzle_diameters"] = nozzle_diameters;
+            }
+        }
+
+        if (config.has("filament_density")) {
+            auto filament_density = config.option<ConfigOptionFloats>("filament_density")->values;
+            std::vector<double> filament_used_g(filament_density.size(), 0);
+            double total_weight = 0;
+            for (const auto& pr : result.print_statistics.total_volumes_per_extruder) {
+                if (pr.first >= filament_density.size()) continue;
+                filament_used_g[pr.first] = filament_density[pr.first] * pr.second * 0.001;
+                total_weight += filament_used_g[pr.first];
+            }
+            response["filament_weight"] = filament_used_g;
+            response["filament_weight_total"] = total_weight;
+        }
+
+        if (config.has("filament_diameter")) {
+            auto filament_diameter_opt = config.option<ConfigOptionFloats>("filament_diameter");
+            if (!filament_diameter_opt) return response;
+            auto filament_diameter = filament_diameter_opt->values;
+            std::vector<double> filament_used_mm(filament_diameter.size(), 0);
+            for (const auto& pr : result.print_statistics.total_volumes_per_extruder) {
+                if (pr.first >= filament_diameter.size()) continue;
+                auto diameter = static_cast<double>(filament_diameter[pr.first]);
+                if (diameter > 0) {
+                    filament_used_mm[pr.first] = pr.second / (M_PI * (diameter * 0.5) * (diameter * 0.5));
+                }
+            }
+            response["filament_used_mm"] = filament_used_mm;
+        }
+
+        auto& filament_extruder_map = wxGetApp().app_config->get_filament_extruder_map_ref();
+        if (!filament_extruder_map.empty()) {
+            json object;
+            for (const auto& item : filament_extruder_map) {
+                object[std::to_string(item.first)] = std::to_string(item.second);
+            }
+            response["filament_extruder_map"] = object;
+        }
+
+        PartPlate* cur_plate = wxGetApp().plater()->get_partplate_list().get_curr_plate();
+        if (cur_plate) {
+            auto* nozzle_opt = cur_plate->fff_print()->config().option<ConfigOptionFloats>("nozzle_diameter");
+            std::vector<std::string> nozzle_list;
+            if (nozzle_opt) {
+                for (float d : nozzle_opt->values) {
+                    nozzle_list.push_back(std::abs(d - 0.2f) < 1e-5f ? "0.2" :
+                                          std::abs(d - 0.4f) < 1e-5f ? "0.4" :
+                                          std::abs(d - 0.6f) < 1e-5f ? "0.6" :
+                                          std::abs(d - 0.8f) < 1e-5f ? "0.8" : std::to_string(d));
+                }
+                response["nozzle_info"] = nozzle_list;
+            }
+        }
+
+        auto current_preset = wxGetApp().preset_bundle->printers.get_edited_preset();
+        std::string c_preset = "";
+        if (current_preset.is_system) {
+            c_preset = current_preset.name;
+        } else {
+            auto base_preset = wxGetApp().preset_bundle->printers.get_preset_base(current_preset);
+            c_preset = base_preset->name;
+        }
+        response["machine_model"] = c_preset;
+
+        json thumbnails = json::array();
+        int thumbnail_count = 0;
+        if (config.has("thumbnails")) {
+            std::string thumbnails_describe = config.option<ConfigOptionString>("thumbnails")->value;
+            std::vector<std::pair<double, double>> thumbnails_size;
+            std::vector<std::string> temp;
+            do {
+                size_t pos = thumbnails_describe.find(", ");
+                std::string tmp = "";
+                if (pos != std::string::npos) {
+                    tmp = thumbnails_describe.substr(0, pos);
+                    thumbnails_describe = thumbnails_describe.substr(pos + 2);
+                } else {
+                    tmp = thumbnails_describe;
+                    thumbnails_describe = "";
+                }
+                size_t end_tail_pos = tmp.find("/");
+                if (end_tail_pos == std::string::npos) break;
+                tmp = tmp.substr(0, end_tail_pos);
+                std::string str_width = tmp.substr(0, tmp.find("x"));
+                std::string str_height = tmp.substr(tmp.find("x") + 1);
+                thumbnails_size.push_back({atof(str_width.c_str()), atof(str_height.c_str())});
+            } while (thumbnails_describe != "");
+            thumbnail_count = thumbnails_size.size();
+            auto thumbnail_list = load_thumbnails(filename, thumbnail_count);
+            for (int i = 0; i < thumbnail_list.size(); ++i) {
+                json thumbnail = json::object();
+                auto thumbnail_string = "data:image/png;base64," + thumbnail_list[i];
+                thumbnail["url"] = thumbnail_string;
+                thumbnail["width"] = thumbnails_size[i].first;
+                thumbnail["height"] = thumbnails_size[i].second;
+                thumbnails.push_back(thumbnail);
+            }
+        }
+        response["thumbnails"] = thumbnails;
+
+        response["filename"] = SSWCP::get_display_filename();
+        response["filepath"] = SSWCP::get_active_filename();
+    } catch (...) {
+        return json::object();
+    }
+    return response;
+}
+
 void SSWCP_MachineOption_Instance::sw_GetFileFilamentMapping()
 {
     try {
