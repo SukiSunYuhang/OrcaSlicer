@@ -1,9 +1,13 @@
 #include "ConnectionSidecar.hpp"
 #include "GUI.hpp"                 // from_u8 / into_u8
-#include <libslic3r/libslic3r.h>   // Slic3r::resources_dir()
+#include "../Utils/Http.hpp"
+#include "libslic3r/Utils.hpp"      // Slic3r::resources_dir()
+#include "nlohmann/json.hpp"
 #include <boost/log/trivial.hpp>
 #include <wx/process.h>            // wxExecute, wxEXEC_*
 #include <wx/utils.h>              // wxKill, wxSIGTERM
+#include <thread>
+#include <chrono>
 
 namespace Slic3r { namespace GUI {
 
@@ -23,8 +27,13 @@ void ConnectionSidecar::stop() {
     }
 }
 
-void ConnectionSidecar::push_token(const std::string&, const std::string&) { /* Task 3 */ }
-void ConnectionSidecar::push_logout() { /* Task 3 */ }
+void ConnectionSidecar::push_token(const std::string& token, const std::string& refresh_token) {
+    doPost(token, refresh_token);
+}
+
+void ConnectionSidecar::push_logout() {
+    doPost("", "");
+}
 
 bool ConnectionSidecar::ensureStarted() {
     if (m_started) return true;
@@ -43,6 +52,37 @@ bool ConnectionSidecar::ensureStarted() {
     return m_started;
 }
 
-void ConnectionSidecar::doPost(const std::string&, const std::string&) { /* Task 3 */ }
+void ConnectionSidecar::doPost(const std::string& token, const std::string& refresh_token) {
+    std::string t = token, r = refresh_token;   // 捕获到线程
+    std::thread([t = std::move(t), r = std::move(r)]() {
+        nlohmann::json body;
+        body["token"] = t;
+        body["refreshToken"] = r;
+        const std::string payload = body.dump();
+
+        constexpr int kMaxRetry = 5;
+        for (int attempt = 0; attempt < kMaxRetry; ++attempt) {
+            bool ok = false;
+            Http::post("http://127.0.0.1:8767/api/updateToken")
+                .header("Content-Type", "application/json")
+                .set_post_body(payload)
+                .timeout_connect(3)
+                .timeout_max(5)
+                .on_complete([&ok](std::string /*body*/, unsigned /*status*/) { ok = true; })
+                .on_error([attempt](std::string /*body*/, std::string err, unsigned status) {
+                    BOOST_LOG_TRIVIAL(warning)
+                        << "sidecar push failed attempt=" << attempt
+                        << " status=" << status << " err=" << err;
+                })
+                .perform_sync();
+            if (ok) {
+                BOOST_LOG_TRIVIAL(info) << "sidecar push ok after attempt=" << attempt;
+                return;
+            }
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+        BOOST_LOG_TRIVIAL(error) << "sidecar push gave up after " << kMaxRetry << " attempts";
+    }).detach();
+}
 
 }} // namespace Slic3r::GUI
