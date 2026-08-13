@@ -649,6 +649,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/TimeoutMap.hpp
     GUI/ConnectionSidecar.cpp
     GUI/ConnectionSidecar.hpp
+    GUI/PreprintContextStore.cpp
+    GUI/PreprintContextStore.hpp
 )
 
 add_subdirectory(GUI/DeviceTab)
