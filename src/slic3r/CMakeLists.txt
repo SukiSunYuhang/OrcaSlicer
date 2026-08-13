@@ -647,6 +647,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/TimeSyncManager.cpp
     Utils/TimeSyncManager.hpp
     Utils/TimeoutMap.hpp
+    GUI/ConnectionSidecar.cpp
+    GUI/ConnectionSidecar.hpp
 )
 
 add_subdirectory(GUI/DeviceTab)
