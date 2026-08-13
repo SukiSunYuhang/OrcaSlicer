@@ -9,6 +9,7 @@
 #include <wx/utils.h>              // wxKill, wxSIGTERM
 #include <thread>
 #include <chrono>
+#include <vector>
 
 namespace Slic3r { namespace GUI {
 
@@ -51,9 +52,21 @@ bool ConnectionSidecar::ensureStarted() {
     // TODO(demo): macOS/Linux —— 二进制名无 .exe 后缀，路径可能是 .app/Contents/Resources
     wxString exe = from_u8(Slic3r::resources_dir()) + wxT("/snapmaker_connection");
 #endif
-    m_pid = wxExecute(exe, wxEXEC_ASYNC | wxEXEC_HIDE_CONSOLE);
+    // sidecar 语言参数：中文 zh-CN，其余 en-US
+    std::string local = (wxGetApp().app_config->get("language") == "zh_CN") ? "zh-CN" : "en-US";
+    wxString    arg   = wxString::FromUTF8("--local=" + local);
+
+#ifdef _WIN32
+    std::vector<const wchar_t*> args;
+    args.emplace_back(exe.wc_str());
+    args.emplace_back(arg.wc_str());
+    args.emplace_back(nullptr);
+    m_pid = wxExecute(const_cast<wchar_t**>(args.data()), wxEXEC_ASYNC | wxEXEC_HIDE_CONSOLE);
+#else
+    m_pid = wxExecute(exe + wxT(" ") + arg, wxEXEC_ASYNC);
+#endif
     m_started = (m_pid > 0);
-    BOOST_LOG_TRIVIAL(info) << "sidecar: spawn " << into_u8(exe) << " -> pid=" << m_pid;
+    BOOST_LOG_TRIVIAL(info) << "sidecar: spawn " << into_u8(exe) << " --local=" << local << " -> pid=" << m_pid;
     if (!m_started) {
         BOOST_LOG_TRIVIAL(error) << "sidecar: failed to spawn " << into_u8(exe);
     }
