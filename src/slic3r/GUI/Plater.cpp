@@ -148,6 +148,8 @@
 #include "NotificationManager.hpp"
 #include "PresetComboBoxes.hpp"
 #include "MsgDialog.hpp"
+#include "SSWCP.hpp"
+#include "PreprintContextStore.hpp"
 #include "ProjectDirtyStateManager.hpp"
 #include "Gizmos/GLGizmoSimplify.hpp" // create suggestion notification
 #include "Gizmos/GLGizmoSVG.hpp" // Drop SVG file
@@ -21442,6 +21444,35 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn, bool us
         dialog->set_send_page(dlg.post_action() == PrintHostPostUploadAction::None);
         dialog->set_gcode_file_name(upload_job.upload_data.source_path.string());
         dialog->set_display_file_name(upload_job.upload_data.upload_path.string());
+
+        // ORCA 预打印上下文交接：构造 payload → POST /api/store → 带 id 开窗
+        std::string src_path        = upload_job.upload_data.source_path.string();
+        std::string disp_name       = upload_job.upload_data.upload_path.string();
+        std::string active_filename = SSWCP::get_active_filename();
+
+        nlohmann::json payload;
+        payload["file_path"]        = src_path;
+        payload["filename"]         = disp_name;
+        payload["active_file"]      = SSWCP::build_active_file_json(src_path, disp_name, false);
+        payload["filament_mapping"] = SSWCP::build_filament_mapping_json(active_filename);
+
+        std::string store_id = boost::uuids::to_string(boost::uuids::random_generator()());
+        auto sres = PreprintContextStore::get().store(store_id, payload);
+
+        if (!sres.ok) {
+            BOOST_LOG_TRIVIAL(error) << "preprint store failed: " << sres.error;
+            MessageDialog dlg(this, _L("Pre-print context was not pushed (sidecar not ready). Open anyway?"),
+                              _L("Note"), wxYES_NO | wxICON_WARNING);
+            if (dlg.ShowModal() != wxID_YES) { delete dialog; return; }
+            store_id.clear();
+        } else if (!sres.file_exists) {
+            BOOST_LOG_TRIVIAL(warning) << "preprint store: file_path not found, continuing";
+            MessageDialog dlg(this, _L("The G-code path is invalid. Continue anyway?"),
+                              _L("Note"), wxYES_NO | wxICON_WARNING);
+            if (dlg.ShowModal() != wxID_YES) { delete dialog; return; }
+        }
+
+        dialog->set_store_id(store_id);
         bool res = dialog->run();
 
         if (dialog->is_finish()) {
