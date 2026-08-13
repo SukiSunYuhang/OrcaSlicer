@@ -670,6 +670,36 @@ void SSWCP_Instance::sw_Exit() {
     wxGetApp().Exit();
 }
 
+nlohmann::json SSWCP::build_active_file_metadata()
+{
+    nlohmann::json metadata_json = nlohmann::json::object();
+    if (wxGetApp().model().model_info) {
+        auto& items = wxGetApp().model().model_info->metadata_items;
+        auto lookup = [&](const std::string& key) {
+            auto it = items.find(key);
+            if (it != items.end()) metadata_json[key] = it->second;
+        };
+        lookup("DesignModelId");
+        lookup("DesignProfileId");
+        lookup("DesignRegion");
+    }
+    return metadata_json;
+}
+
+nlohmann::json SSWCP::build_active_file_json(const std::string& file_path, const std::string& file_name, bool /*is_zip*/)
+{
+    nlohmann::json res;
+    res["metadata"]    = build_active_file_metadata();
+    res["file_name"]   = file_name;
+    std::string url_path = file_path;
+    std::replace(url_path.begin(), url_path.end(), '\\', '/');
+    res["file_path"]   = file_path;
+    res["origin_size"] = boost::filesystem::file_size(file_path);
+    res["checksum"]    = calc_sha256_base64(file_path);
+    res["url"]         = std::string(LOCALHOST_URL) + "8767" + "/localfile/" + Http::url_encode(url_path);
+    return res;
+}
+
 void SSWCP_Instance::sw_GetActiveFile()
 {
     std::string file_path = SSWCP::get_active_filename();
@@ -682,21 +712,6 @@ void SSWCP_Instance::sw_GetActiveFile()
     if (m_param_data.count("is_zip")) {
         iszip = m_param_data["is_zip"].get<bool>();
     }
-
-    json metadata_json = json::object();
-    if (wxGetApp().model().model_info) {
-        auto& items = wxGetApp().model().model_info->metadata_items;
-        auto lookup = [&](const std::string& key) {
-            auto it = items.find(key);
-            if (it != items.end())
-                metadata_json[key] = it->second;
-        };
-        // Currently only these three metadata fields are returned for business needs
-        lookup("DesignModelId");
-        lookup("DesignProfileId");
-        lookup("DesignRegion");
-    }
-    m_res_data["metadata"] = metadata_json;
 
     if (iszip) {
         std::weak_ptr<SSWCP_Instance> weak_self = shared_from_this();
@@ -711,6 +726,7 @@ void SSWCP_Instance::sw_GetActiveFile()
             size_t      name_index = file_name.find_last_of(".");
             size_t      path_index = file_path.find_last_of(".");
             if (!(name_index == std::string::npos || path_index == std::string::npos)) {
+                self->m_res_data["metadata"]  = SSWCP::build_active_file_metadata();
                 self->m_res_data["file_name"] = file_name.substr(0, name_index) + ".zip";
                 self->m_res_data["file_path"] = wxString(zipname).ToUTF8();
                 SSWCP::m_file_size_mutex.lock();
@@ -740,16 +756,7 @@ void SSWCP_Instance::sw_GetActiveFile()
         });
 
     } else {
-        m_res_data["file_name"] = file_name;
-        std::string url_path = file_path;
-        std::replace(url_path.begin(), url_path.end(), '\\', '/');
-        m_res_data["file_path"] = file_path;
-        m_res_data["origin_size"] = boost::filesystem::file_size(file_path);
-
-        // checksum: SHA-256 digest as standard Base64, for Flutter-side integrity verification
-        m_res_data["checksum"] = calc_sha256_base64(file_path);
-        m_res_data["url"]      = std::string(LOCALHOST_URL) + "8767" + "/localfile/" + Http::url_encode(url_path);
-
+        m_res_data = SSWCP::build_active_file_json(file_path, file_name, false);
         send_to_js();
         finish_job();
     }

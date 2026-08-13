@@ -660,6 +660,9 @@ public:
 
     static std::string get_display_filename();
 
+    static nlohmann::json build_active_file_metadata();
+    static nlohmann::json build_active_file_json(const std::string& file_path, const std::string& file_name, bool is_zip = false);
+
     static std::mutex m_file_size_mutex;
     static long long m_active_file_size;
 
