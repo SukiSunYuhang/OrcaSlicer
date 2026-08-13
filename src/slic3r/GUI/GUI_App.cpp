@@ -95,6 +95,7 @@
 #include "../Utils/Process.hpp"
 #include "../Utils/MacDarkMode.hpp"
 #include "../Utils/Http.hpp"
+#include "ConnectionSidecar.hpp"
 #include "../Utils/InstanceID.hpp"
 #include "../Utils/UndoRedo.hpp"
 #include "slic3r/Config/Snapshot.hpp"
@@ -2500,6 +2501,7 @@ int GUI_App::OnExit()
         BOOST_LOG_TRIVIAL(error) << "Failed to clean up encrypt bbl network log file";
     }
 
+    ConnectionSidecar::get().stop();
     return wxApp::OnExit();
 }
 
@@ -3075,6 +3077,9 @@ bool GUI_App::on_init_inner()
     }
 
     profiler.mark("on_init_inner return");
+
+    // ORCA sidecar demo: 拉起 snapmaker_connection.exe，登录态补发
+    ConnectionSidecar::get().start();
 
     return true;
 }
@@ -4271,6 +4276,7 @@ void GUI_App::sm_ShowUserLogin(bool show)
 
 void GUI_App::sm_request_user_logout()
 {
+    ConnectionSidecar::get().push_logout();   // ORCA sidecar demo: 下发空 token
     if (m_login_userinfo.is_user_login()) {
         m_login_userinfo.set_user_login(false);
     }
