@@ -1,4 +1,5 @@
 #include "ConnectionSidecar.hpp"
+#include "GUI_App.hpp"
 #include "GUI.hpp"                 // from_u8 / into_u8
 #include "../Utils/Http.hpp"
 #include "libslic3r/Utils.hpp"      // Slic3r::resources_dir()
@@ -16,7 +17,14 @@ ConnectionSidecar& ConnectionSidecar::get() {
     return inst;
 }
 
-void ConnectionSidecar::start() { /* Task 4 */ }
+void ConnectionSidecar::start() {
+    if (!ensureStarted()) return;
+    // 启动补发：若当前已登录，立即把 access token 下发一次（refresh 空，见 plan Global Constraints）
+    auto* info = wxGetApp().sm_get_userinfo();
+    if (info && info->is_user_login()) {
+        push_token(info->get_user_token(), "");
+    }
+}
 
 void ConnectionSidecar::stop() {
     if (m_pid > 0) {
