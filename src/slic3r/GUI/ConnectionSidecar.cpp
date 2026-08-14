@@ -52,9 +52,14 @@ bool ConnectionSidecar::ensureStarted() {
     // TODO(demo): macOS/Linux —— 二进制名无 .exe 后缀，路径可能是 .app/Contents/Resources
     wxString exe = from_u8(Slic3r::resources_dir()) + wxT("/snapmaker_connection");
 #endif
-    // sidecar 地区参数：中国大陆 zh-CN，其余 en-US
-    std::string local = (wxGetApp().app_config->get_country_code() == "CN") ? "zh-CN" : "en-US";
-    wxString    arg   = wxString::FromUTF8("--local=" + local);
+    // sidecar locale：语言-地区（如 en-US / zh-CN / de-DE）
+    // 语言取 Orca language（zh_CN→zh，其余取前缀），地区取 country_code
+    std::string lang     = wxGetApp().app_config->get("language");
+    std::string region   = wxGetApp().app_config->get_country_code();
+    std::string lang_pre = (lang == "zh_CN") ? "zh" : (lang.empty() ? "en" : lang.substr(0, 2));
+    if (region.empty()) region = "US";
+    std::string locale   = lang_pre + "-" + region;
+    wxString    arg      = wxString::FromUTF8("--locale=" + locale);
 
 #ifdef _WIN32
     std::vector<const wchar_t*> args;
@@ -66,7 +71,7 @@ bool ConnectionSidecar::ensureStarted() {
     m_pid = wxExecute(exe + wxT(" ") + arg, wxEXEC_ASYNC);
 #endif
     m_started = (m_pid > 0);
-    BOOST_LOG_TRIVIAL(info) << "sidecar: spawn " << into_u8(exe) << " --local=" << local << " -> pid=" << m_pid;
+    BOOST_LOG_TRIVIAL(info) << "sidecar: spawn " << into_u8(exe) << " --locale=" << locale << " -> pid=" << m_pid;
     if (!m_started) {
         BOOST_LOG_TRIVIAL(error) << "sidecar: failed to spawn " << into_u8(exe);
     }
