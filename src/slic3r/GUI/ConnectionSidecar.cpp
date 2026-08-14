@@ -52,8 +52,8 @@ bool ConnectionSidecar::ensureStarted() {
     // TODO(demo): macOS/Linux —— 二进制名无 .exe 后缀，路径可能是 .app/Contents/Resources
     wxString exe = from_u8(Slic3r::resources_dir()) + wxT("/snapmaker_connection");
 #endif
-    // sidecar 语言参数：中文 zh-CN，其余 en-US
-    std::string local = (wxGetApp().app_config->get("language") == "zh_CN") ? "zh-CN" : "en-US";
+    // sidecar 地区参数：中国大陆 zh-CN，其余 en-US
+    std::string local = (wxGetApp().app_config->get_country_code() == "CN") ? "zh-CN" : "en-US";
     wxString    arg   = wxString::FromUTF8("--local=" + local);
 
 #ifdef _WIN32
