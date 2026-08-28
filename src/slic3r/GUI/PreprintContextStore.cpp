@@ -1,4 +1,5 @@
 #include "PreprintContextStore.hpp"
+#include "ConnectionSidecar.hpp"
 #include "../Utils/Http.hpp"
 #include <boost/log/trivial.hpp>
 
@@ -20,7 +21,8 @@ PreprintContextStore::StoreResult PreprintContextStore::store(const std::string&
     body["ttl_seconds"] = ttl_seconds;
     const std::string payload_str = body.dump();
 
-    Http::post("http://127.0.0.1:8767/api/store")
+    // 端口来自 sidecar /health 返回值（未就绪时退回默认端口，由重试/失败路径兜底）
+    Http::post(ConnectionSidecar::get().base_url() + "/api/store")
         .header("Content-Type", "application/json")
         .set_post_body(payload_str)
         .timeout_connect(3)
