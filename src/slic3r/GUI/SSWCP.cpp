@@ -677,7 +677,8 @@ nlohmann::json SSWCP::build_active_file_metadata()
         auto& items = wxGetApp().model().model_info->metadata_items;
         auto lookup = [&](const std::string& key) {
             auto it = items.find(key);
-            if (it != items.end()) metadata_json[key] = it->second;
+            if (it != items.end())
+                metadata_json[key] = it->second;
         };
         lookup("DesignModelId");
         lookup("DesignProfileId");
@@ -688,16 +689,20 @@ nlohmann::json SSWCP::build_active_file_metadata()
 
 nlohmann::json SSWCP::build_active_file_json(const std::string& file_path, const std::string& file_name, bool /*is_zip*/)
 {
-    nlohmann::json res;
-    res["metadata"]    = build_active_file_metadata();
-    res["file_name"]   = file_name;
     std::string url_path = file_path;
     std::replace(url_path.begin(), url_path.end(), '\\', '/');
-    res["file_path"]   = file_path;
-    res["origin_size"] = boost::filesystem::file_size(file_path);
-    res["checksum"]    = calc_sha256_base64(file_path);
-    res["url"]         = std::string(LOCALHOST_URL) + "8767" + "/localfile/" + Http::url_encode(url_path);
-    return res;
+
+    nlohmann::json result;
+    result["metadata"]  = build_active_file_metadata();
+    result["file_name"] = file_name;
+    result["file_path"] = file_path;
+    result["url"]       = wxGetApp().gateway_localfile_url(url_path);
+
+    boost::system::error_code file_error;
+    const bool                file_exists = boost::filesystem::is_regular_file(file_path, file_error);
+    result["origin_size"] = file_exists ? boost::filesystem::file_size(file_path) : 0;
+    result["checksum"]    = file_exists ? calc_sha256_base64(file_path) : std::string{};
+    return result;
 }
 
 void SSWCP_Instance::sw_GetActiveFile()
@@ -713,6 +718,21 @@ void SSWCP_Instance::sw_GetActiveFile()
         iszip = m_param_data["is_zip"].get<bool>();
     }
 
+    json metadata_json = json::object();
+    if (wxGetApp().model().model_info) {
+        auto& items = wxGetApp().model().model_info->metadata_items;
+        auto lookup = [&](const std::string& key) {
+            auto it = items.find(key);
+            if (it != items.end())
+                metadata_json[key] = it->second;
+        };
+        // Currently only these three metadata fields are returned for business needs
+        lookup("DesignModelId");
+        lookup("DesignProfileId");
+        lookup("DesignRegion");
+    }
+    m_res_data["metadata"] = metadata_json;
+
     if (iszip) {
         std::weak_ptr<SSWCP_Instance> weak_self = shared_from_this();
 
@@ -726,14 +746,13 @@ void SSWCP_Instance::sw_GetActiveFile()
             size_t      name_index = file_name.find_last_of(".");
             size_t      path_index = file_path.find_last_of(".");
             if (!(name_index == std::string::npos || path_index == std::string::npos)) {
-                self->m_res_data["metadata"]  = SSWCP::build_active_file_metadata();
                 self->m_res_data["file_name"] = file_name.substr(0, name_index) + ".zip";
                 self->m_res_data["file_path"] = wxString(zipname).ToUTF8();
                 SSWCP::m_file_size_mutex.lock();
                 self->m_res_data["origin_size"] = SSWCP::m_active_file_size;
                 std::string url_zip_path = std::string(wxString(zipname).ToUTF8());
                 std::replace(url_zip_path.begin(), url_zip_path.end(), '\\', '/');
-                self->m_res_data["url"] = std::string(LOCALHOST_URL) + "8767" + "/localfile/" + Http::url_encode(url_zip_path);
+                self->m_res_data["url"] = wxGetApp().gateway_localfile_url(url_zip_path);
                 SSWCP::m_file_size_mutex.unlock();
 
                 // checksum: SHA-256 digest as standard Base64, for Flutter-side integrity verification
@@ -756,7 +775,16 @@ void SSWCP_Instance::sw_GetActiveFile()
         });
 
     } else {
-        m_res_data = SSWCP::build_active_file_json(file_path, file_name, false);
+        m_res_data["file_name"] = file_name;
+        std::string url_path = file_path;
+        std::replace(url_path.begin(), url_path.end(), '\\', '/');
+        m_res_data["file_path"] = file_path;
+        m_res_data["origin_size"] = boost::filesystem::file_size(file_path);
+
+        // checksum: SHA-256 digest as standard Base64, for Flutter-side integrity verification
+        m_res_data["checksum"] = calc_sha256_base64(file_path);
+        m_res_data["url"]      = wxGetApp().gateway_localfile_url(url_path);
+
         send_to_js();
         finish_job();
     }
@@ -3173,67 +3201,72 @@ void SSWCP_MachineOption_Instance::sw_FinishFilamentMapping()
         handle_general_fail();
     }
 }
+
 nlohmann::json SSWCP::build_filament_mapping_json(const std::string& filename)
 {
     json response = json::object();
     try {
-        if (filename.empty()) return response;
-        if (!boost::filesystem::exists(filename) || !boost::filesystem::is_regular_file(filename)) return response;
+        if (filename.empty() || !boost::filesystem::exists(filename) || !boost::filesystem::is_regular_file(filename))
+            return response;
 
         auto* print = wxGetApp().plater()->get_partplate_list().get_curr_plate()->fff_print();
         auto& config = print->config();
         auto full_config = print->full_print_config();
         auto& result = *(wxGetApp().plater()->get_partplate_list().get_curr_plate()->get_slice_result());
+        response["estimated_time"] = wxGetApp()
+            .mainframe->plater()
+            ->get_partplate_list()
+            .get_curr_plate()
+            ->get_slice_result()
+            ->print_statistics.modes[static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Normal)]
+            .time;
 
-        auto time = wxGetApp().mainframe->plater()->get_partplate_list().get_curr_plate()
-                        ->get_slice_result()->print_statistics.modes[static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Normal)].time;
-        response["estimated_time"] = time;
-
-        auto color_to_int = [](const std::string& oriclr) -> long long {
-            long long res = 0;
-            if ((oriclr.size() != 7 && oriclr.size() != 9) || oriclr[0] != '#') return 0;
-            auto colorSize = oriclr.size();
-            for (auto i = 1; i < colorSize; i++) {
-                if (oriclr[colorSize - i] - '0' >= 0 && oriclr[colorSize - i] - '0' <= 9) {
-                    res += std::pow(16, i - 1) * (oriclr[colorSize - i] - '0');
-                } else {
-                    res += std::pow(16, i - 1) * (oriclr[colorSize - i] - 'A' + 10);
-                }
+        auto color_to_int = [](const std::string& original_color) -> long long {
+            long long result = 0;
+            if ((original_color.size() != 7 && original_color.size() != 9) || original_color[0] != '#')
+                return 0;
+            for (auto i = 1; i < original_color.size(); ++i) {
+                const int digit = original_color[original_color.size() - i] - '0';
+                const int value = digit >= 0 && digit <= 9 ? digit : original_color[original_color.size() - i] - 'A' + 10;
+                result += static_cast<long long>(std::pow(16, i - 1)) * value;
             }
-            return res;
+            return result;
         };
 
         if (config.has("filament_colour")) {
             std::vector<std::string> filament_color = config.option<ConfigOptionStrings>("filament_colour")->values;
             const ConfigOptionStrings* filament_multi_colors = nullptr;
-            if (config.has("filament_multi_colors")) filament_multi_colors = config.option<ConfigOptionStrings>("filament_multi_colors");
+            if (config.has("filament_multi_colors"))
+                filament_multi_colors = config.option<ConfigOptionStrings>("filament_multi_colors");
             const ConfigOptionInts* filament_colour_modes = nullptr;
-            if (config.has("filament_colour_mode")) filament_colour_modes = config.option<ConfigOptionInts>("filament_colour_mode");
-            std::vector<long long> number_res(filament_color.size(), 0);
-            std::vector<std::string> str_res(filament_color.size());
-            json multi_color_res = json::array();
+            if (config.has("filament_colour_mode"))
+                filament_colour_modes = config.option<ConfigOptionInts>("filament_colour_mode");
+
+            std::vector<long long> number_result(filament_color.size(), 0);
+            std::vector<std::string> string_result(filament_color.size());
+            json multi_color_result = json::array();
             for (size_t i = 0; i < filament_color.size(); ++i) {
-                number_res[i] = color_to_int(filament_color[i]);
-                str_res[i] = filament_color[i];
+                number_result[i] = color_to_int(filament_color[i]);
+                string_result[i] = filament_color[i];
                 const bool has_multi_colors = filament_multi_colors != nullptr && filament_multi_colors->values.size() > i;
                 const bool has_mode = filament_colour_modes != nullptr && filament_colour_modes->values.size() > i;
-                const std::string multi_colors = has_multi_colors ? filament_multi_colors->values[i] : std::string();
-                FilamentColorMode colorMode = FilamentColorMode::Segment;
-                if (has_mode) colorMode = FilamentColorModeFromConfig(filament_colour_modes->values[i]);
-                multi_color_res.push_back(FilamentColorUtils::BuildPreprintColorMultiItem(multi_colors, colorMode, filament_color[i]));
+                const std::string multi_colors = has_multi_colors ? filament_multi_colors->values[i] : std::string{};
+                FilamentColorMode color_mode = FilamentColorMode::Segment;
+                if (has_mode)
+                    color_mode = FilamentColorModeFromConfig(filament_colour_modes->values[i]);
+                multi_color_result.push_back(FilamentColorUtils::BuildPreprintColorMultiItem(multi_colors, color_mode, filament_color[i]));
             }
-            response["filament_color"] = number_res;
-            response["filament_color_rgba"] = str_res;
-            response["filament_color_multi"] = multi_color_res;
+            response["filament_color"] = number_result;
+            response["filament_color_rgba"] = string_result;
+            response["filament_color_multi"] = multi_color_result;
         }
 
         if (const auto* filament_type_opt = full_config.option<ConfigOptionStrings>("filament_type");
             filament_type_opt != nullptr && !filament_type_opt->values.empty()) {
             std::vector<std::string> filament_types;
             size_t filament_count = filament_type_opt->values.size();
-            if (const auto* filament_colour_opt = full_config.option<ConfigOptionStrings>("filament_colour")) {
+            if (const auto* filament_colour_opt = full_config.option<ConfigOptionStrings>("filament_colour"))
                 filament_count = std::max(filament_count, filament_colour_opt->values.size());
-            }
             filament_types.reserve(filament_count);
             for (size_t i = 0; i < filament_count; ++i) {
                 std::string filament_type = filament_type_opt->get_at(int(i));
@@ -3244,11 +3277,11 @@ nlohmann::json SSWCP::build_filament_mapping_json(const std::string& filename)
         }
 
         if (full_config.has("nozzle_diameter")) {
-            const auto* opt_nozzle_diameters = full_config.option<ConfigOptionFloats>("nozzle_diameter");
-            if (opt_nozzle_diameters != nullptr) {
+            const auto* nozzle_diameters_opt = full_config.option<ConfigOptionFloats>("nozzle_diameter");
+            if (nozzle_diameters_opt != nullptr) {
                 std::vector<std::string> nozzle_diameters;
-                nozzle_diameters.reserve(opt_nozzle_diameters->values.size());
-                for (double diameter : opt_nozzle_diameters->values) {
+                nozzle_diameters.reserve(nozzle_diameters_opt->values.size());
+                for (double diameter : nozzle_diameters_opt->values) {
                     std::ostringstream stream;
                     stream << std::fixed << std::setprecision(1) << diameter;
                     nozzle_diameters.emplace_back(stream.str());
@@ -3261,26 +3294,28 @@ nlohmann::json SSWCP::build_filament_mapping_json(const std::string& filename)
             auto filament_density = config.option<ConfigOptionFloats>("filament_density")->values;
             std::vector<double> filament_used_g(filament_density.size(), 0);
             double total_weight = 0;
-            for (const auto& pr : result.print_statistics.total_volumes_per_extruder) {
-                if (pr.first >= filament_density.size()) continue;
-                filament_used_g[pr.first] = filament_density[pr.first] * pr.second * 0.001;
-                total_weight += filament_used_g[pr.first];
+            for (const auto& item : result.print_statistics.total_volumes_per_extruder) {
+                if (item.first >= filament_density.size())
+                    continue;
+                filament_used_g[item.first] = filament_density[item.first] * item.second * 0.001;
+                total_weight += filament_used_g[item.first];
             }
             response["filament_weight"] = filament_used_g;
             response["filament_weight_total"] = total_weight;
         }
 
         if (config.has("filament_diameter")) {
-            auto filament_diameter_opt = config.option<ConfigOptionFloats>("filament_diameter");
-            if (!filament_diameter_opt) return response;
+            const auto* filament_diameter_opt = config.option<ConfigOptionFloats>("filament_diameter");
+            if (!filament_diameter_opt)
+                return response;
             auto filament_diameter = filament_diameter_opt->values;
             std::vector<double> filament_used_mm(filament_diameter.size(), 0);
-            for (const auto& pr : result.print_statistics.total_volumes_per_extruder) {
-                if (pr.first >= filament_diameter.size()) continue;
-                auto diameter = static_cast<double>(filament_diameter[pr.first]);
-                if (diameter > 0) {
-                    filament_used_mm[pr.first] = pr.second / (M_PI * (diameter * 0.5) * (diameter * 0.5));
-                }
+            for (const auto& item : result.print_statistics.total_volumes_per_extruder) {
+                if (item.first >= filament_diameter.size())
+                    continue;
+                const double diameter = static_cast<double>(filament_diameter[item.first]);
+                if (diameter > 0)
+                    filament_used_mm[item.first] = item.second / (M_PI * diameter * 0.5 * diameter * 0.5);
             }
             response["filament_used_mm"] = filament_used_mm;
         }
@@ -3288,73 +3323,70 @@ nlohmann::json SSWCP::build_filament_mapping_json(const std::string& filename)
         auto& filament_extruder_map = wxGetApp().app_config->get_filament_extruder_map_ref();
         if (!filament_extruder_map.empty()) {
             json object;
-            for (const auto& item : filament_extruder_map) {
+            for (const auto& item : filament_extruder_map)
                 object[std::to_string(item.first)] = std::to_string(item.second);
-            }
             response["filament_extruder_map"] = object;
         }
 
-        PartPlate* cur_plate = wxGetApp().plater()->get_partplate_list().get_curr_plate();
-        if (cur_plate) {
-            auto* nozzle_opt = cur_plate->fff_print()->config().option<ConfigOptionFloats>("nozzle_diameter");
-            std::vector<std::string> nozzle_list;
+        PartPlate* current_plate = wxGetApp().plater()->get_partplate_list().get_curr_plate();
+        if (current_plate) {
+            auto* nozzle_opt = current_plate->fff_print()->config().option<ConfigOptionFloats>("nozzle_diameter");
             if (nozzle_opt) {
-                for (float d : nozzle_opt->values) {
-                    nozzle_list.push_back(std::abs(d - 0.2f) < 1e-5f ? "0.2" :
-                                          std::abs(d - 0.4f) < 1e-5f ? "0.4" :
-                                          std::abs(d - 0.6f) < 1e-5f ? "0.6" :
-                                          std::abs(d - 0.8f) < 1e-5f ? "0.8" : std::to_string(d));
+                std::vector<std::string> nozzle_list;
+                for (float diameter : nozzle_opt->values) {
+                    nozzle_list.push_back(std::abs(diameter - 0.2f) < 1e-5f ? "0.2" :
+                                          std::abs(diameter - 0.4f) < 1e-5f ? "0.4" :
+                                          std::abs(diameter - 0.6f) < 1e-5f ? "0.6" :
+                                          std::abs(diameter - 0.8f) < 1e-5f ? "0.8" : std::to_string(diameter));
                 }
                 response["nozzle_info"] = nozzle_list;
             }
         }
 
         auto current_preset = wxGetApp().preset_bundle->printers.get_edited_preset();
-        std::string c_preset = "";
+        std::string preset_name;
         if (current_preset.is_system) {
-            c_preset = current_preset.name;
+            preset_name = current_preset.name;
         } else {
             auto base_preset = wxGetApp().preset_bundle->printers.get_preset_base(current_preset);
-            c_preset = base_preset->name;
+            preset_name = base_preset->name;
         }
-        response["machine_model"] = c_preset;
+        response["machine_model"] = preset_name;
 
         json thumbnails = json::array();
-        int thumbnail_count = 0;
         if (config.has("thumbnails")) {
-            std::string thumbnails_describe = config.option<ConfigOptionString>("thumbnails")->value;
-            std::vector<std::pair<double, double>> thumbnails_size;
-            std::vector<std::string> temp;
+            std::string thumbnail_description = config.option<ConfigOptionString>("thumbnails")->value;
+            std::vector<std::pair<double, double>> thumbnail_sizes;
             do {
-                size_t pos = thumbnails_describe.find(", ");
-                std::string tmp = "";
-                if (pos != std::string::npos) {
-                    tmp = thumbnails_describe.substr(0, pos);
-                    thumbnails_describe = thumbnails_describe.substr(pos + 2);
+                const size_t separator = thumbnail_description.find(", ");
+                std::string item;
+                if (separator != std::string::npos) {
+                    item = thumbnail_description.substr(0, separator);
+                    thumbnail_description = thumbnail_description.substr(separator + 2);
                 } else {
-                    tmp = thumbnails_describe;
-                    thumbnails_describe = "";
+                    item = thumbnail_description;
+                    thumbnail_description.clear();
                 }
-                size_t end_tail_pos = tmp.find("/");
-                if (end_tail_pos == std::string::npos) break;
-                tmp = tmp.substr(0, end_tail_pos);
-                std::string str_width = tmp.substr(0, tmp.find("x"));
-                std::string str_height = tmp.substr(tmp.find("x") + 1);
-                thumbnails_size.push_back({atof(str_width.c_str()), atof(str_height.c_str())});
-            } while (thumbnails_describe != "");
-            thumbnail_count = thumbnails_size.size();
-            auto thumbnail_list = load_thumbnails(filename, thumbnail_count);
-            for (int i = 0; i < thumbnail_list.size(); ++i) {
-                json thumbnail = json::object();
-                auto thumbnail_string = "data:image/png;base64," + thumbnail_list[i];
-                thumbnail["url"] = thumbnail_string;
-                thumbnail["width"] = thumbnails_size[i].first;
-                thumbnail["height"] = thumbnails_size[i].second;
-                thumbnails.push_back(thumbnail);
+                const size_t slash = item.find("/");
+                if (slash == std::string::npos)
+                    break;
+                item = item.substr(0, slash);
+                const size_t x = item.find("x");
+                if (x == std::string::npos)
+                    break;
+                thumbnail_sizes.emplace_back(std::stod(item.substr(0, x)), std::stod(item.substr(x + 1)));
+            } while (!thumbnail_description.empty());
+
+            auto thumbnail_list = load_thumbnails(filename, int(thumbnail_sizes.size()));
+            for (size_t i = 0; i < thumbnail_list.size(); ++i) {
+                json thumbnail;
+                thumbnail["url"] = "data:image/png;base64," + thumbnail_list[i];
+                thumbnail["width"] = thumbnail_sizes[i].first;
+                thumbnail["height"] = thumbnail_sizes[i].second;
+                thumbnails.push_back(std::move(thumbnail));
             }
         }
         response["thumbnails"] = thumbnails;
-
         response["filename"] = SSWCP::get_display_filename();
         response["filepath"] = SSWCP::get_active_filename();
     } catch (...) {
@@ -7407,14 +7439,12 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                     wxGetApp().mainframe->update_slice_print_status(MainFrame::eEventPlateUpdate);
 
                                     if (!wxGetApp().mainframe->m_printer_view->isSnapmakerPage()) {
-                                        wxString url      = wxString::FromUTF8(std::string(LOCALHOST_URL) + "8767" +
-                                                                               "/web/flutter_web/index.html?path=2");
+                                        wxString url      = wxGetApp().gateway_web_url("device_control");
                                         auto     real_url = wxGetApp().get_international_url(url);
                                         wxGetApp().mainframe->load_printer_url(real_url); 
                                     } else {
                                         if (reload_device_view) {
-                                            wxString url      = wxString::FromUTF8(std::string(LOCALHOST_URL) + "8767" +
-                                                                                   "/web/flutter_web/index.html?path=2");
+                                            wxString url      = wxGetApp().gateway_web_url("device_control");
                                             auto     real_url = wxGetApp().get_international_url(url);
 
                                             wxGetApp().mainframe->load_printer_url(real_url);

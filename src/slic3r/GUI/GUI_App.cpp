@@ -94,8 +94,8 @@
 #include "../Utils/PrintHost.hpp"
 #include "../Utils/Process.hpp"
 #include "../Utils/MacDarkMode.hpp"
+#include "../Utils/GatewayService.hpp"
 #include "../Utils/Http.hpp"
-#include "ConnectionSidecar.hpp"
 #include "../Utils/InstanceID.hpp"
 #include "../Utils/UndoRedo.hpp"
 #include "slic3r/Config/Snapshot.hpp"
@@ -2458,6 +2458,7 @@ bool GUI_App::OnInit()
 
 int GUI_App::OnExit()
 {
+    stop_gateway_service();
     stop_sync_user_preset();
 
     if (m_device_manager) {
@@ -2501,7 +2502,6 @@ int GUI_App::OnExit()
         BOOST_LOG_TRIVIAL(error) << "Failed to clean up encrypt bbl network log file";
     }
 
-    ConnectionSidecar::get().stop();
     return wxApp::OnExit();
 }
 
@@ -2651,6 +2651,9 @@ bool GUI_App::on_init_inner()
 
     // If load_language() fails, the application closes.
     load_language(wxString(), true);
+    if (!start_gateway_service())
+        BOOST_LOG_TRIVIAL(warning) << "connection gateway was not ready during application startup";
+    profiler.mark("gateway_service.start");
 #ifdef _MSW_DARK_MODE
 
 #ifndef __WINDOWS__
@@ -3077,9 +3080,6 @@ bool GUI_App::on_init_inner()
     }
 
     profiler.mark("on_init_inner return");
-
-    // ORCA sidecar demo: 拉起 snapmaker_connection.exe，登录态补发
-    ConnectionSidecar::get().start();
 
     return true;
 }
@@ -3828,6 +3828,7 @@ void GUI_App::recreate_GUI(const wxString &msg_name)
     update_http_extra_header();
 
     mainframe->shutdown(true);
+    start_gateway_service(true);
 
     ProgressDialog dlg(msg_name, msg_name, 100, nullptr, wxPD_AUTO_HIDE);
     dlg.Pulse();
@@ -3906,7 +3907,7 @@ void GUI_App::recreate_GUI(const wxString &msg_name)
 
     if (!preset_bundle->is_bbl_vendor()) {
         if (is_snapmaker_u1) {
-            wxString url      = wxString::FromUTF8(std::string(LOCALHOST_URL) + "8767" + "/web/flutter_web/index.html?path=2");
+            wxString url      = wxGetApp().gateway_web_url("device_control");
             auto     real_url = wxGetApp().get_international_url(url);
             mainframe->load_printer_url(real_url);
         } else {
@@ -4276,7 +4277,6 @@ void GUI_App::sm_ShowUserLogin(bool show)
 
 void GUI_App::sm_request_user_logout()
 {
-    ConnectionSidecar::get().push_logout();   // ORCA sidecar demo: 下发空 token
     if (m_login_userinfo.is_user_login()) {
         m_login_userinfo.set_user_login(false);
     }
@@ -5615,6 +5615,86 @@ void GUI_App::start_page_http_server()
 {
     if (!m_page_http_server.is_started())
         m_page_http_server.start();
+}
+
+std::string GUI_App::gateway_locale() const
+{
+    std::string locale = app_config != nullptr ? app_config->get("language") : std::string{};
+    if (locale.empty())
+        locale = into_u8(current_language_code_safe());
+    std::replace(locale.begin(), locale.end(), '_', '-');
+    return locale;
+}
+
+bool GUI_App::start_gateway_service(bool restart)
+{
+    if (m_gateway_service && !restart)
+        return m_gateway_service->is_connected() || m_gateway_service->wait_for_connected(std::chrono::milliseconds{8000});
+
+    if (restart)
+        stop_gateway_service();
+
+    try {
+        Gateway::GatewayService::Dependencies dependencies;
+        dependencies.process_manager = std::make_shared<Gateway::ConnectionProcessManager>(Gateway::ConnectionProcessManager::Config{
+            boost::filesystem::path{Slic3r::resources_dir()} / "snapmaker_connection.exe"});
+        dependencies.http      = std::make_shared<Gateway::LibcurlHttpTransport>();
+        dependencies.websocket = std::make_shared<Gateway::GatewayWebSocketTransport>();
+        dependencies.dispatcher = [this](std::function<void()> task) { CallAfter(std::move(task)); };
+
+        m_gateway_service = std::make_unique<Gateway::GatewayService>(Gateway::GatewayService::Config{}, std::move(dependencies));
+        const std::string locale = gateway_locale();
+        BOOST_LOG_TRIVIAL(info) << "starting connection gateway with locale " << locale;
+        if (!m_gateway_service->start(locale))
+            return false;
+        if (!m_gateway_service->wait_for_connected(std::chrono::milliseconds{8000})) {
+            BOOST_LOG_TRIVIAL(warning) << "connection gateway was not ready after 8000ms";
+            return false;
+        }
+        BOOST_LOG_TRIVIAL(info) << "connection gateway ready at " << m_gateway_service->base_url();
+        return true;
+    } catch (const std::exception& exception) {
+        BOOST_LOG_TRIVIAL(error) << "failed to start connection gateway: " << exception.what();
+        m_gateway_service.reset();
+        return false;
+    }
+}
+
+void GUI_App::stop_gateway_service()
+{
+    if (m_gateway_service)
+        m_gateway_service->stop();
+    m_gateway_service.reset();
+}
+
+wxString GUI_App::gateway_web_url(const wxString& page_key) const
+{
+    const std::string url = m_gateway_service ? m_gateway_service->web_url(into_u8(page_key)) : std::string{};
+    if (!url.empty())
+        return from_u8(url);
+
+    return wxString::FromUTF8(LOCALHOST_URL + std::to_string(get_page_http_port()) + "/web/orca/missing_connection.html");
+}
+
+std::string GUI_App::gateway_localfile_url(const std::string& file_path) const
+{
+    return m_gateway_service ? m_gateway_service->localfile_url(file_path) : std::string{};
+}
+
+Gateway::PreprintStoreResult GUI_App::gateway_store_preprint_context(const std::string& id, const nlohmann::json& payload, int ttl_seconds) const
+{
+    if (!m_gateway_service)
+        return {{Gateway::GatewayErrorCode::NotConnected, "connection gateway is not available"}};
+    return m_gateway_service->store_preprint_context(id, payload, ttl_seconds);
+}
+
+bool GUI_App::is_gateway_url(const wxString& url) const
+{
+    const std::string base_url = m_gateway_service ? m_gateway_service->base_url() : std::string{};
+    if (base_url.empty())
+        return false;
+    const std::string candidate = into_u8(url);
+    return candidate.rfind(base_url, 0) == 0;
 }
 void GUI_App::stop_page_http_server()
 {

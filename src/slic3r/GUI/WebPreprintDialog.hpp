@@ -65,4 +65,4 @@ private:
 
 }} // namespace Slic3r::GUI
 
-#endif 
+#endif

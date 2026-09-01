@@ -1,5 +1,4 @@
 #include "WebSMUserLoginDialog.hpp"
-#include "ConnectionSidecar.hpp"
 
 #include <string.h>
 #include "I18N.hpp"
@@ -222,8 +221,6 @@ void SMUserLogin::OnNavigationRequest(wxWebViewEvent &evt)
                         sentryReportLog(SENTRY_LOG_TRACE, userInfo, BP_LOGIN);
                         wxGetApp().sm_get_userinfo()->set_user_token(token);
                         wxGetApp().sm_get_userinfo()->set_user_login(true);
-                        // ORCA sidecar demo: 下发登录态（refresh 空，见 plan Global Constraints）
-                        ConnectionSidecar::get().push_token(token, "");
                     }
                 })
                 .on_error([&](std::string body, std::string error, unsigned status) {

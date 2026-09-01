@@ -143,13 +143,12 @@
 #include "../Utils/UndoRedo.hpp"
 #include "../Utils/PresetUpdater.hpp"
 #include "../Utils/Process.hpp"
+#include "../Utils/GatewayProtocol.hpp"
 #include "RemovableDriveManager.hpp"
 #include "InstanceCheck.hpp"
 #include "NotificationManager.hpp"
 #include "PresetComboBoxes.hpp"
 #include "MsgDialog.hpp"
-#include "SSWCP.hpp"
-#include "PreprintContextStore.hpp"
 #include "ProjectDirtyStateManager.hpp"
 #include "Gizmos/GLGizmoSimplify.hpp" // create suggestion notification
 #include "Gizmos/GLGizmoSVG.hpp" // Drop SVG file
@@ -3571,7 +3570,7 @@ void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
                                                                  MainFrame::PrintSelectType::eSendGcode;
 
                 if (url.find("127.0.0.1") != std::string::npos) {
-                    url = wxString::FromUTF8(std::string(LOCALHOST_URL) + "8767" + "/web/flutter_web/index.html?path=3");
+                    url = wxGetApp().gateway_web_url("device_control");
                 }
             }
             
@@ -3598,8 +3597,7 @@ void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
                 if(hasOnlineMachine)
                     p->combo_printer->set_show_machine_connecting_button(true);
     
-                wxString url = wxString::FromUTF8(std::string(LOCALHOST_URL) + "8767" +
-                                                  "/web/flutter_web/index.html?path=2");
+                wxString url = wxGetApp().gateway_web_url("device_control");
                 auto real_url = wxGetApp().get_international_url(url);
                 
                 if (!is_sm_page && reload_printer_view) {
@@ -21445,31 +21443,33 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn, bool us
         dialog->set_gcode_file_name(upload_job.upload_data.source_path.string());
         dialog->set_display_file_name(upload_job.upload_data.upload_path.string());
 
-        // ORCA 预打印上下文交接：构造 payload → POST /api/store → 带 id 开窗
-        std::string src_path        = upload_job.upload_data.source_path.string();
-        std::string disp_name       = upload_job.upload_data.upload_path.string();
-        std::string active_filename = SSWCP::get_active_filename();
+        const std::string source_path = upload_job.upload_data.source_path.string();
+        const std::string display_name = upload_job.upload_data.upload_path.string();
+        const std::string active_filename = SSWCP::get_active_filename();
 
         nlohmann::json payload;
-        payload["file_path"]        = src_path;
-        payload["filename"]         = disp_name;
-        payload["active_file"]      = SSWCP::build_active_file_json(src_path, disp_name, false);
+        payload["file_path"] = source_path;
+        payload["filename"] = display_name;
+        payload["active_file"] = SSWCP::build_active_file_json(source_path, display_name, false);
         payload["filament_mapping"] = SSWCP::build_filament_mapping_json(active_filename);
 
         std::string store_id = boost::uuids::to_string(boost::uuids::random_generator()());
-        auto sres = PreprintContextStore::get().store(store_id, payload);
-
-        if (!sres.ok) {
-            BOOST_LOG_TRIVIAL(error) << "preprint store failed: " << sres.error;
-            MessageDialog dlg(this, _L("Pre-print context was not pushed (sidecar not ready). Open anyway?"),
-                              _L("Note"), wxYES_NO | wxICON_WARNING);
-            if (dlg.ShowModal() != wxID_YES) { delete dialog; return; }
+        const auto store_result = wxGetApp().gateway_store_preprint_context(store_id, payload);
+        if (!store_result.ok) {
+            BOOST_LOG_TRIVIAL(error) << "preprint store failed: " << store_result.error.message;
+            MessageDialog confirm_dialog(this, _L("Failed to upload pre-print context. Open anyway?"), _L("Note"), wxYES_NO | wxICON_WARNING);
+            if (confirm_dialog.ShowModal() != wxID_YES) {
+                delete dialog;
+                return;
+            }
             store_id.clear();
-        } else if (!sres.file_exists) {
-            BOOST_LOG_TRIVIAL(warning) << "preprint store: file_path not found, continuing";
-            MessageDialog dlg(this, _L("The G-code path is invalid. Continue anyway?"),
-                              _L("Note"), wxYES_NO | wxICON_WARNING);
-            if (dlg.ShowModal() != wxID_YES) { delete dialog; return; }
+        } else if (!store_result.file_exists) {
+            BOOST_LOG_TRIVIAL(warning) << "preprint store reported that the G-code path does not exist";
+            MessageDialog confirm_dialog(this, _L("The G-code path is invalid. Continue anyway?"), _L("Note"), wxYES_NO | wxICON_WARNING);
+            if (confirm_dialog.ShowModal() != wxID_YES) {
+                delete dialog;
+                return;
+            }
         }
 
         dialog->set_store_id(store_id);
